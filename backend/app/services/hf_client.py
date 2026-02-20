@@ -99,6 +99,10 @@ class HFInferenceClient:
                 return resp.json()
 
             except httpx.HTTPStatusError as exc:
+                # Permanent model availability errors; retrying won't help.
+                if exc.response.status_code in (404, 410):
+                    logger.error("HF model unavailable (%s) for %s", exc.response.status_code, model)
+                    raise
                 if attempt < MAX_RETRIES:
                     backoff = 2 ** attempt
                     logger.warning(
