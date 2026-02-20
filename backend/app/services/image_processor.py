@@ -9,6 +9,13 @@ from app.services.hf_client import HFInferenceClient
 
 logger = logging.getLogger(__name__)
 
+# Ordered caption model fallback list. Some public models may become unavailable
+# on the shared Inference API and return HTTP 410/404.
+CAPTION_MODELS = [
+    "nlpconnect/vit-gpt2-image-captioning",
+    "Salesforce/blip-image-captioning-large",
+]
+
 # Defect categories for zero-shot classification
 DEFECT_CATEGORIES = [
     "structural damage",
@@ -43,14 +50,28 @@ class ImageProcessor:
         """Generate a text caption using BLIP."""
         # Resize large images to < 2 MB for HF API
         image_bytes = _resize_if_needed(image_bytes, max_bytes=2 * 1024 * 1024)
+        last_error: Exception | None = None
 
-        result = await self.hf.inference_binary(
-            "Salesforce/blip-image-captioning-large",
-            image_bytes,
-        )
-        # result is a list: [{"generated_text": "..."}]
-        if isinstance(result, list) and len(result) > 0:
-            return result[0].get("generated_text", "")
+        for model in CAPTION_MODELS:
+            try:
+                result = await self.hf.inference_binary(model, image_bytes)
+                # Common response shape: [{"generated_text": "..."}]
+                if isinstance(result, list) and len(result) > 0:
+                    text = result[0].get("generated_text", "")
+                    if text:
+                        return text
+                # Alternate shape: {"generated_text": "..."}
+                if isinstance(result, dict):
+                    text = result.get("generated_text", "")
+                    if text:
+                        return text
+                logger.warning("Unexpected caption response for model %s: %s", model, type(result))
+            except Exception as exc:
+                last_error = exc
+                logger.warning("Caption model failed (%s): %s", model, exc)
+
+        if last_error:
+            raise last_error
         return ""
 
     async def classify_text(self, text: str) -> dict:
