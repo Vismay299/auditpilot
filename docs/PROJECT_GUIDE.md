@@ -1,7 +1,7 @@
 # AuditPilot Project Guide
 
-Version: 1.0  
-Generated: 2026-02-20
+Version: 1.1  
+Generated: 2026-02-23
 
 ## 1. Project Summary
 
@@ -27,14 +27,15 @@ Backend:
 - SQLAlchemy ORM + PostgreSQL
 - Supabase-hosted Postgres
 - pgvector extension for 384-dim finding embeddings
-- Hugging Face Inference API for multimodal AI tasks
+- Google Gemini Vision API (free tier) for image defect analysis
+- Hugging Face Inference API for audio/PDF/text AI tasks
 
 AI models used:
-- Image captioning: `Salesforce/blip-image-captioning-large`
-- Audio transcription: `openai/whisper-large-v3`
-- Classification: `facebook/bart-large-mnli`
-- Summarization: `facebook/bart-large-cnn`
-- Embeddings: `sentence-transformers/all-MiniLM-L6-v2`
+- Image analysis: Google Gemini `gemini-2.0-flash` (direct vision defect detection, with `gemini-2.0-flash-lite` fallback)
+- Audio transcription: `openai/whisper-large-v3` (HuggingFace)
+- Text classification: `facebook/bart-large-mnli` (HuggingFace, used for audio/PDF)
+- Summarization: `facebook/bart-large-cnn` (HuggingFace)
+- Embeddings: `sentence-transformers/all-MiniLM-L6-v2` (HuggingFace)
 
 Deployment:
 - Frontend: designed for Vercel
@@ -122,15 +123,23 @@ Background processing starts after upload (`BackgroundTasks`):
 3. File status set `processing`
 4. File downloaded from local storage service
 5. Pipeline by type:
-   - Image: caption -> classify -> embed -> finding
-   - Audio: transcribe -> classify -> embed -> finding
-   - PDF: extract text -> classify -> embed -> finding
+   - **Image**: Gemini Vision direct analysis → embed → finding (single API call classifies defects with category, confidence, severity, and description)
+   - **Audio**: Whisper transcribe → BART classify → embed → finding
+   - **PDF**: pypdf extract text → BART classify → embed → finding
 6. File status set `completed` (or `failed` with error)
 7. Inspection progress updated
 8. If all files done, `InspectionCompletionService.finalize()` computes:
    - risk level (max severity)
    - narrative summary (BART-CNN)
    - final inspection status (`review` if any finding needs review else `completed`)
+
+Image pipeline details:
+- Uses `GeminiVisionClient` (`backend/app/services/gemini_client.py`) with structured JSON prompt
+- Gemini directly analyzes the image for building/safety defects and returns category, confidence, severity
+- Categories: structural damage, electrical hazard, water damage, fire risk, equipment issue, fall hazard, clear/no defect
+- Retry logic with exponential backoff for 429 rate limits and 503 server errors
+- Model fallback: `gemini-2.0-flash` → `gemini-2.0-flash-lite`
+- On error, findings are marked as `category="unknown"`, `needs_review=True` (not misleading "clear/no defect")
 
 ### 5.5 Storage
 
@@ -211,12 +220,14 @@ Backend (`backend/.env`):
 - `SUPABASE_URL`
 - `SUPABASE_KEY` or `SUPABASE_ANON_KEY` (JWT validation client)
 - `SUPABASE_SERVICE_KEY` (for service-level access if needed)
-- `HF_API_TOKEN` (required by current HF client)
+- `HF_API_TOKEN` (required by HF client for audio/PDF/embedding tasks)
+- `GEMINI_API_KEY` (required for image analysis — free tier from [aistudio.google.com/apikey](https://aistudio.google.com/apikey))
 - `LOCAL_UPLOAD_DIR` (optional)
 
 Important naming note:
 - `render.yaml` currently defines `HUGGINGFACE_API_TOKEN`, while code reads `HF_API_TOKEN`.
 - For production correctness, align variable names.
+- `GEMINI_API_KEY` must also be set in Render env vars for deployed backend.
 
 ## 9. Local Development Guide
 
@@ -328,6 +339,7 @@ backend/app/schemas/user.py
 backend/app/services/__init__.py
 backend/app/services/audio_processor.py
 backend/app/services/embedding_service.py
+backend/app/services/gemini_client.py
 backend/app/services/hf_client.py
 backend/app/services/image_processor.py
 backend/app/services/inspection_completion_service.py

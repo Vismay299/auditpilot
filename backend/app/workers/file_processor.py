@@ -93,22 +93,22 @@ async def _process_image(
     inspection_id: UUID,
     image_bytes: bytes,
 ) -> None:
-    """Image pipeline: BLIP caption → BART classify → embed → create Finding."""
-    img_proc = ImageProcessor(hf)
+    """Image pipeline: Gemini Vision direct analysis → embed → create Finding."""
+    from app.services.gemini_client import GeminiVisionClient
+
+    gemini = GeminiVisionClient()
     embed_svc = EmbeddingService(hf)
 
     try:
-        # 1. Caption
-        caption = await img_proc.generate_caption(image_bytes)
-        logger.info("file_id=%s caption: %s", file_id, caption[:100])
+        # 1. Analyze image directly with Gemini Vision
+        classification = await gemini.analyze_image(image_bytes)
+        logger.info("file_id=%s gemini result: %s (%.0f%%)", file_id, classification["category"], classification["confidence"] * 100)
 
-        # 2. Classify
-        classification = await img_proc.classify_text(caption)
+        # 2. Generate embedding from the description
+        description_text = classification.get("description", classification["category"])
+        embedding = await embed_svc.generate_embedding(description_text)
 
-        # 3. Embed
-        embedding = await embed_svc.generate_embedding(caption)
-
-        # 4. Create Finding
+        # 3. Create Finding
         finding_repo.create(
             inspection_id=inspection_id,
             file_id=file_id,
@@ -116,28 +116,29 @@ async def _process_image(
             severity=classification["severity"],
             confidence_score=classification["confidence"],
             needs_review=classification["needs_review"],
-            ai_caption=caption,
+            ai_caption=classification.get("description", ""),
             description=f"Image classified as {classification['category']} with {classification['confidence']:.0%} confidence.",
             extra_metadata=classification.get("all_scores", {}),
             embedding=embedding,
         )
         logger.info("file_id=%s finding created: %s (%s)", file_id, classification["category"], classification["severity"])
     except Exception as exc:
-        # Keep the pipeline resilient when upstream caption models are unavailable.
-        logger.warning("file_id=%s image pipeline fallback due to error: %s", file_id, exc)
+        logger.exception("file_id=%s image pipeline failed", file_id)
         finding_repo.create(
             inspection_id=inspection_id,
             file_id=file_id,
-            category="clear/no defect",
-            severity="clear",
+            category="unknown",
+            severity="medium",
             confidence_score=0.0,
             needs_review=True,
             ai_caption=None,
-            description="Automatic image captioning was unavailable for this file. Manual review required.",
+            description=f"Image analysis failed: {str(exc)[:200]}. Manual review required.",
             extra_metadata={"pipeline_error": str(exc)},
             embedding=[0.0] * 384,
         )
         logger.info("file_id=%s fallback finding created (needs_review=true)", file_id)
+    finally:
+        await gemini.close()
 
 
 async def _process_audio(
